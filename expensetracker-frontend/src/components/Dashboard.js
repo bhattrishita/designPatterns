@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import './Dashboard.css';
 
 const Dashboard = () => {
@@ -16,8 +17,9 @@ const Dashboard = () => {
     description: '',
     amount: '',
     paidBy: '',
-    splitType: 'equal', // equal, percentage, or full
-    splits: {}
+    splitType: 'equal',
+    splits: {},
+    selectedMembers: []
   });
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [selectedGroupDetails, setSelectedGroupDetails] = useState(null);
@@ -173,42 +175,101 @@ const Dashboard = () => {
       amount: '',
       paidBy: '',
       splitType: 'equal',
-      splits: {}
+      splits: {},
+      selectedMembers: []
     });
   };
 
-  const handleExpenseSubmit = () => {
-    if (!expenseData.description || !expenseData.amount || !expenseData.paidBy) {
-      alert('Please fill in all required fields');
+  const handleExpenseSubmit = async () => {
+    if (!expenseData.description || !expenseData.amount || !expenseData.paidBy || expenseData.selectedMembers.length === 0) {
+      alert('Please fill in all required fields and select members to split with');
       return;
     }
 
     const amount = parseFloat(expenseData.amount);
-    let updatedGroups = [...groups];
-    const groupIndex = updatedGroups.findIndex(g => g.id === selectedGroup.id);
-
-    if (groupIndex !== -1) {
-      updatedGroups[groupIndex] = {
-        ...updatedGroups[groupIndex],
-        totalExpenses: updatedGroups[groupIndex].totalExpenses + amount
-      };
-      setGroups(updatedGroups);
+    
+    // Calculate splits based on split type
+    let calculatedSplits = {};
+    if (expenseData.splitType === 'equal') {
+      const splitAmount = amount / expenseData.selectedMembers.length;
+      expenseData.selectedMembers.forEach(memberId => {
+        calculatedSplits[memberId] = splitAmount;
+      });
+    } else if (expenseData.splitType === 'percentage') {
+      expenseData.selectedMembers.forEach(memberId => {
+        const percentage = parseFloat(expenseData.splits[memberId] || 0);
+        calculatedSplits[memberId] = (percentage / 100) * amount;
+      });
+    } else {
+      calculatedSplits = { ...expenseData.splits };
     }
 
-    setShowExpenseModal(false);
-    setExpenseData({
-      description: '',
-      amount: '',
-      paidBy: '',
-      splitType: 'equal',
-      splits: {}
-    });
+    // Prepare data for API call
+    const apiData = {
+      totalAmount: amount,
+      participantIds: expenseData.selectedMembers,
+      strategyType: expenseData.splitType.toUpperCase(),
+      customValues: expenseData.splitType === 'percentage' ? 
+        expenseData.selectedMembers.map(memberId => parseFloat(expenseData.splits[memberId] || 0)) : 
+        null
+    };
+
+    try {
+      const response = await axios.post("http://localhost:8080/api/expenses/add", apiData);
+      console.log("Splits:", response.data);
+      
+      // Create new expense object
+      const newExpense = {
+        id: response.data.id || expenses.length + 1,
+        groupId: selectedGroup.id,
+        description: expenseData.description,
+        amount: amount,
+        paidBy: parseInt(expenseData.paidBy),
+        date: new Date().toISOString().split('T')[0],
+        splitType: expenseData.splitType,
+        splits: calculatedSplits,
+        settled: expenseData.selectedMembers.reduce((acc, memberId) => {
+          if (memberId !== parseInt(expenseData.paidBy)) {
+            acc[memberId] = false;
+          }
+          return acc;
+        }, {})
+      };
+
+      // Update expenses state
+      setExpenses([...expenses, newExpense]);
+      
+      // Update local group state
+      let updatedGroups = [...groups];
+      const groupIndex = updatedGroups.findIndex(g => g.id === selectedGroup.id);
+
+      if (groupIndex !== -1) {
+        updatedGroups[groupIndex] = {
+          ...updatedGroups[groupIndex],
+          totalExpenses: updatedGroups[groupIndex].totalExpenses + amount
+        };
+        setGroups(updatedGroups);
+      }
+
+      setShowExpenseModal(false);
+      setExpenseData({
+        description: '',
+        amount: '',
+        paidBy: '',
+        splitType: 'equal',
+        splits: {},
+        selectedMembers: []
+      });
+    } catch (err) {
+      console.error("Error adding expense:", err);
+      alert('Failed to add expense. Please try again.');
+    }
   };
 
   const calculateSplitAmount = () => {
     const amount = parseFloat(expenseData.amount) || 0;
     if (expenseData.splitType === 'equal') {
-      const memberCount = selectedGroup?.members.length || 1;
+      const memberCount = expenseData.selectedMembers.length || 1;
       return (amount / memberCount).toFixed(2);
     }
     return amount.toFixed(2);
@@ -603,6 +664,31 @@ const Dashboard = () => {
               </div>
 
               <div className="form-group">
+                <label>Split Between</label>
+                <div className="member-selection">
+                  {selectedGroup.members.map(member => (
+                    <label key={member.id} className="member-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={expenseData.selectedMembers.includes(member.id)}
+                        onChange={(e) => {
+                          const updatedMembers = e.target.checked
+                            ? [...expenseData.selectedMembers, member.id]
+                            : expenseData.selectedMembers.filter(id => id !== member.id);
+                          setExpenseData({
+                            ...expenseData,
+                            selectedMembers: updatedMembers,
+                            splits: {} // Reset splits when members change
+                          });
+                        }}
+                      />
+                      <span>{member.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="form-group">
                 <label>Split Type</label>
                 <select
                   value={expenseData.splitType}
@@ -611,34 +697,60 @@ const Dashboard = () => {
                 >
                   <option value="equal">Split Equally</option>
                   <option value="percentage">Split by Percentage</option>
-                  <option value="full">Full Amount</option>
+                  <option value="exact">Split by Exact Amount</option>
                 </select>
               </div>
 
-              {expenseData.splitType === 'equal' && (
+              {expenseData.splitType === 'equal' && expenseData.selectedMembers.length > 0 && (
                 <div className="split-preview">
-                  <p>Each person will pay: ${calculateSplitAmount()}</p>
+                  <p>Each selected person will pay: ${(parseFloat(expenseData.amount || 0) / expenseData.selectedMembers.length).toFixed(2)}</p>
                 </div>
               )}
 
-              {expenseData.splitType === 'percentage' && (
+              {expenseData.splitType === 'percentage' && expenseData.selectedMembers.length > 0 && (
                 <div className="percentage-splits">
-                  {selectedGroup.members.map(member => (
-                    <div key={member.id} className="percentage-input">
-                      <label>{member.name}</label>
-                      <input
-                        type="number"
-                        placeholder="%"
-                        min="0"
-                        max="100"
-                        value={expenseData.splits[member.id] || ''}
-                        onChange={(e) => {
-                          const splits = {...expenseData.splits, [member.id]: e.target.value};
-                          setExpenseData({...expenseData, splits});
-                        }}
-                      />
-                    </div>
-                  ))}
+                  {expenseData.selectedMembers.map(memberId => {
+                    const member = selectedGroup.members.find(m => m.id === memberId);
+                    return (
+                      <div key={memberId} className="percentage-input">
+                        <label>{member.name}</label>
+                        <input
+                          type="number"
+                          placeholder="%"
+                          min="0"
+                          max="100"
+                          value={expenseData.splits[memberId] || ''}
+                          onChange={(e) => {
+                            const splits = {...expenseData.splits, [memberId]: e.target.value};
+                            setExpenseData({...expenseData, splits});
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {expenseData.splitType === 'exact' && expenseData.selectedMembers.length > 0 && (
+                <div className="exact-splits">
+                  {expenseData.selectedMembers.map(memberId => {
+                    const member = selectedGroup.members.find(m => m.id === memberId);
+                    return (
+                      <div key={memberId} className="exact-input">
+                        <label>{member.name}</label>
+                        <input
+                          type="number"
+                          placeholder="Amount"
+                          min="0"
+                          value={expenseData.splits[memberId] || ''}
+                          onChange={(e) => {
+                            const splits = {...expenseData.splits, [memberId]: e.target.value};
+                            setExpenseData({...expenseData, splits});
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -725,21 +837,21 @@ const Dashboard = () => {
                             <span className="expense-date">{formatDate(expense.date)}</span>
                           </div>
                           <div className="expense-amount">
-                            ${expense.amount}
+                            ${typeof expense.amount === 'number' ? expense.amount.toFixed(2) : expense.amount}
                           </div>
                         </div>
                         
                         <div className="expense-details">
                           <p>Paid by: {getMemberName(expense.paidBy)}</p>
                           <div className="splits-list">
-                            {Object.entries(expense.splits).map(([memberId, amount]) => (
+                            {Object.entries(expense.splits || {}).map(([memberId, amount]) => (
                               <div key={memberId} className="split-item">
-                                <span>{getMemberName(memberId)}</span>
-                                <span>${amount}</span>
-                                {memberId !== expense.paidBy.toString() && (
+                                <span>{getMemberName(parseInt(memberId))}</span>
+                                <span>${typeof amount === 'number' ? amount.toFixed(2) : amount}</span>
+                                {parseInt(memberId) !== expense.paidBy && (
                                   <button
                                     className={`settle-btn ${expense.settled?.[memberId] ? 'settled' : ''}`}
-                                    onClick={() => handleSettleBalance(expense.id, memberId)}
+                                    onClick={() => handleSettleBalance(expense.id, parseInt(memberId))}
                                     disabled={expense.settled?.[memberId]}
                                   >
                                     {expense.settled?.[memberId] ? 'Settled' : 'Settle'}
