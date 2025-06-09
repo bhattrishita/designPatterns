@@ -6,6 +6,7 @@ import com.expensetracker_backend.expensetracker.repository.UserRepository;
 import com.expensetracker_backend.expensetracker.service.ExpenseService;
 import com.expensetracker_backend.expensetracker.split.SplitStrategy;
 import com.expensetracker_backend.expensetracker.split.SplitStrategyFactory;
+import com.expensetracker_backend.expensetracker.util.ExpenseManager;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -33,6 +34,26 @@ public class ExpenseServiceImpl implements ExpenseService {
                 users,
                 request.getCustomValues()
         );
+
+
+        // Singleton integration here
+        ExpenseManager manager = ExpenseManager.getInstance();
+
+        User paidBy = userRepository.findById(request.getPaidBy())
+                .orElseThrow(() -> new RuntimeException("Payer not found"));
+
+        for (Map.Entry<User, Double> entry : splits.entrySet()) {
+            User participant = entry.getKey();
+            double amount = entry.getValue();
+
+            if (!participant.equals(paidBy)) {
+                ExpenseManager.getInstance().addBalance(paidBy, participant, amount);
+            }
+        }
+
+        System.out.println("------ BALANCE TRACKER STATE ------");
+        ExpenseManager.getInstance().printAllBalances();
+
 
         // Convert to a simple map of names for frontend display
         return splits.entrySet().stream()
